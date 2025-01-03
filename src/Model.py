@@ -5,8 +5,6 @@ import tensorflow as tf
 import numpy as np
 import neural as neural
 from MSINModule import MSINCell, MSIN, MSINStateTuple
-import tensorflow.contrib.distributions as ds
-from tensorflow.contrib.layers import batch_norm
 from ConfigLoader import logger, ss_size, vocab_size, config_model, path_parser
 
 
@@ -643,8 +641,8 @@ class Model:
         res = tf.reshape(res, shape)
 
         if use_bn:
-            res = batch_norm(res, center=True, scale=True, decay=0.99, updates_collections=None,
-                             is_training=self.is_training_phase, scope=scope)
+            res = tf.keras.layers.BatchNormalization()(result, training=is_training_phase)
+
 
         if activation == 'tanh':
             res = tf.nn.tanh(res)
