@@ -1,167 +1,177 @@
-#!/usr/local/bin/python
-from __future__ import print_function
 import os
-import collections
-from random import uniform
 import tensorflow as tf
-from tensorflow.python.eager import context
-from tensorflow.python.framework import constant_op
-from tensorflow.python.framework import dtypes
-from tensorflow.python.framework import ops
-from tensorflow.python.framework import tensor_shape
-from tensorflow.python.framework import tensor_util
-from tensorflow.python.ops import tensor_array_ops
-from tensorflow.python.ops import control_flow_ops
-from tensorflow.python.ops import math_ops
-from tensorflow.python.ops import array_ops
-from tensorflow.python.ops import variable_scope as vs
-from tensorflow.python.ops.gen_math_ops import maximum
-from tensorflow.python.keras import backend
-from tensorflow.python.ops.init_ops import Initializer
-from tensorflow.python.util import nest
-from tensorflow.contrib.layers import xavier_initializer
 import numpy as np
-
-
-
+import collections
 
 _MSINStateTuple = collections.namedtuple("MSINStateTuple", ("h", "v"))
 
+
 class MSINStateTuple(_MSINStateTuple):
-  """Tuple used by LSTM Cells for `state_size`, `zero_state`, and output state.
-  Stores two elements: `(c, h)`, in that order.
-  Only used when `state_is_tuple=True`.
-  """
-  __slots__ = ()
+    __slots__ = ()
 
-  @property
-  def dtype(self):
-    (h, v) = self
-    if h.dtype == v.dtype:
-        return h.dtype
-    else:
-        raise TypeError("Inconsistent internal state: %s vs %s" %
-                      (str(h.dtype), str(v.dtype)))
-    
-class MSINCell(object):        
+    @property
+    def dtype(self):
+        (h, v) = self
+        if h.dtype == v.dtype:
+            return h.dtype
+        else:
+            raise TypeError("Inconsistent internal state: {} vs {}".format(h.dtype, v.dtype))
 
+
+class MSINCell(tf.keras.layers.Layer):
     def __init__(self, input_size, num_units, v_size, max_n_msgs, forget_bias=1.0):
         super(MSINCell, self).__init__()
-
-        self._input_sizes = input_size
-        self._v_size = v_size
-        self._num_units = num_units
-        self._forget_bias = forget_bias
+        self.input_size = input_size
+        self.num_units = num_units
+        self.v_size = v_size
         self.max_n_msgs = max_n_msgs
+        self.forget_bias = forget_bias
 
-        #v
-        '''
-        self.W_sa = tf.Variable(tf.random_normal(shape=[v_size, num_units],stddev=0.01,mean=0,dtype=tf.float32))
-        self.W_ha = tf.Variable(tf.random_normal(shape=[num_units, num_units],stddev=0.01,mean=0,dtype=tf.float32))
-        '''
-        self.W_sa = tf.get_variable('W_sa',shape=[v_size, num_units],dtype=tf.float32,initializer=xavier_initializer())
-        self.W_ha = tf.get_variable('W_ha',shape=[num_units, num_units],dtype=tf.float32,initializer=xavier_initializer())
-        self.b_a = tf.Variable(tf.zeros(num_units), dtype=tf.float32)
-        self.v_a = tf.Variable(tf.zeros(num_units), dtype=tf.float32)
+        # Initialize weights using Keras initializers
+        self.W_sa = self.add_weight(shape=(v_size, num_units), initializer="glorot_uniform", name="W_sa")
+        self.W_ha = self.add_weight(shape=(num_units, num_units), initializer="glorot_uniform", name="W_ha")
+        self.b_a = self.add_weight(shape=(num_units,), initializer="zeros", name="b_a")
+        self.v_a = self.add_weight(shape=(num_units,), initializer="zeros", name="v_a")
 
+        self.W_f = self.add_weight(shape=(v_size, num_units), initializer="glorot_uniform", name="W_f")
+        self.W_hf = self.add_weight(shape=(num_units, num_units), initializer="glorot_uniform", name="W_hf")
+        self.b_f = self.add_weight(shape=(num_units,), initializer="zeros", name="b_f")
 
-        #f
-        self.W_f = tf.get_variable('W_f',shape=[v_size, num_units],dtype=tf.float32, initializer=xavier_initializer())
-        self.W_hf = tf.get_variable('W_hf',shape=[num_units, num_units],dtype=tf.float32,initializer=xavier_initializer())
-        self.b_f = tf.Variable(tf.zeros(num_units), dtype=tf.float32)
-        
-        #o
-        self.W_o = tf.get_variable('W_o',shape=[v_size, num_units],dtype=tf.float32, initializer=xavier_initializer())
-        self.W_ho = tf.get_variable('W_ho',shape=[num_units, num_units],dtype=tf.float32,initializer=xavier_initializer())
-        self.b_o = tf.Variable(tf.zeros(num_units), dtype=tf.float32)
-        #t
-        self.W_t = tf.get_variable('W_t',shape=[v_size, num_units],dtype=tf.float32, initializer=xavier_initializer())
-        self.W_ht = tf.get_variable('W_ht',shape=[num_units, num_units],dtype=tf.float32,initializer=xavier_initializer())
-        self.b_t = tf.Variable(tf.zeros(num_units), dtype=tf.float32)
+        self.W_o = self.add_weight(shape=(v_size, num_units), initializer="glorot_uniform", name="W_o")
+        self.W_ho = self.add_weight(shape=(num_units, num_units), initializer="glorot_uniform", name="W_ho")
+        self.b_o = self.add_weight(shape=(num_units,), initializer="zeros", name="b_o")
 
+        self.W_t = self.add_weight(shape=(v_size, num_units), initializer="glorot_uniform", name="W_t")
+        self.W_ht = self.add_weight(shape=(num_units, num_units), initializer="glorot_uniform", name="W_ht")
+        self.b_t = self.add_weight(shape=(num_units,), initializer="zeros", name="b_t")
 
-        #k
-        
-        self.W_k = tf.get_variable('W_k',shape=[input_size, num_units],dtype=tf.float32, initializer=xavier_initializer())
-        self.W_hk = tf.get_variable('W_hk',shape=[num_units, num_units],dtype=tf.float32,initializer=xavier_initializer())
-        self.W_vk = tf.get_variable('W_vk',shape=[v_size, num_units],dtype=tf.float32,initializer=xavier_initializer())
-        self.b_k = tf.Variable(tf.zeros(num_units), dtype=tf.float32)
-        
+        self.W_k = self.add_weight(shape=(input_size, num_units), initializer="glorot_uniform", name="W_k")
+        self.W_hk = self.add_weight(shape=(num_units, num_units), initializer="glorot_uniform", name="W_hk")
+        self.W_vk = self.add_weight(shape=(v_size, num_units), initializer="glorot_uniform", name="W_vk")
+        self.b_k = self.add_weight(shape=(num_units,), initializer="zeros", name="b_k")
 
-        #hx
-        self.W_s = tf.get_variable('W_s',shape=[input_size, num_units],dtype=tf.float32, initializer=xavier_initializer())
-        self.W_hs = tf.get_variable('W_hs',shape=[num_units, num_units],dtype=tf.float32,initializer=xavier_initializer())
-        self.b_s = tf.Variable(tf.zeros(num_units), dtype=tf.float32)
-        
-        #hv
-        self.W_v = tf.get_variable('W_v',shape=[v_size, num_units],dtype=tf.float32, initializer=xavier_initializer())
-        self.W_hv = tf.get_variable('W_hv',shape=[num_units, num_units],dtype=tf.float32,initializer=xavier_initializer())
-        self.b_v = tf.Variable(tf.zeros(num_units), dtype=tf.float32)
+        self.W_s = self.add_weight(shape=(input_size, num_units), initializer="glorot_uniform", name="W_s")
+        self.W_hs = self.add_weight(shape=(num_units, num_units), initializer="glorot_uniform", name="W_hs")
+        self.b_s = self.add_weight(shape=(num_units,), initializer="zeros", name="b_s")
 
-
-
-    def _zero_state_tensors(self, state_size, batch_size, dtype):
- 
-
-        def get_state_shape(s):
-    
-            c = MSIN()._concat(batch_size, s)
-            size = array_ops.zeros(c, dtype=dtype)
-
-            return size
-
-        return nest.map_structure(get_state_shape, state_size)
-    
-    def zero_state(self, batch_size, dtype):
-        state_size = self.state_size
-    
-        with backend.name_scope(type(self).__name__ + "ZeroState"):
-            output = self._zero_state_tensors(state_size, batch_size, dtype)
-        return output
+        self.W_v = self.add_weight(shape=(v_size, num_units), initializer="glorot_uniform", name="W_v")
+        self.W_hv = self.add_weight(shape=(num_units, num_units), initializer="glorot_uniform", name="W_hv")
+        self.b_v = self.add_weight(shape=(num_units,), initializer="zeros", name="b_v")
 
     @property
     def state_size(self):
-        return MSINStateTuple(self._num_units, self._v_size)
+        return MSINStateTuple(self.num_units, self.v_size)
 
     @property
     def output_size(self):
-        return self._num_units
-
-    @property
-    def P_size(self):
-        return self.max_n_msgs
+        return self.num_units
 
     def call(self, X, S, state):
-        # Parameters of gates are concatenated into one multiply for efficiency.
         h, v = state
-    
-        a = tf.tanh(tf.matmul(S, tf.reshape(tf.tile(self.W_sa, [tf.shape(S)[0],1]), [tf.shape(S)[0], self.W_sa.shape[0], self.W_sa.shape[1]])) + tf.reshape(tf.tile((tf.matmul(h, self.W_ha) + self.b_a), [tf.shape(S)[1], 1]), [tf.shape(S)[0], tf.shape(S)[1], self.W_sa.shape[1]]))
-        P = tf.nn.softmax(tf.transpose(tf.matmul(a, tf.reshape(tf.tile(self.v_a, [tf.shape(S)[0]]), [tf.shape(S)[0] , self._num_units, 1])), perm = [0, 2, 1]))
-        
-        new_P = tf.squeeze(P, 1)
 
-        text = tf.squeeze(tf.matmul(P, S), 1)
-        F = tf.sigmoid(tf.matmul(text, self.W_f) + tf.matmul(h, self.W_hf)  + self.b_f)
-        O = tf.sigmoid(tf.matmul(text, self.W_o) + tf.matmul(h, self.W_ho)  + self.b_o)
-        text_new = tf.tanh(tf.matmul(text, self.W_t) + tf.matmul(h, self.W_ht)  + self.b_t)
+        a = tf.tanh(tf.matmul(S, self.W_sa) + tf.expand_dims(tf.matmul(h, self.W_ha) + self.b_a, 1))
+        P = tf.nn.softmax(tf.matmul(a, tf.expand_dims(self.v_a, -1)), axis=1)
+
+        text = tf.reduce_sum(P * S, axis=1)
+        F = tf.sigmoid(tf.matmul(text, self.W_f) + tf.matmul(h, self.W_hf) + self.b_f)
+        O = tf.sigmoid(tf.matmul(text, self.W_o) + tf.matmul(h, self.W_ho) + self.b_o)
+        text_new = tf.tanh(tf.matmul(text, self.W_t) + tf.matmul(h, self.W_ht) + self.b_t)
         V = F * v + O * text_new
 
         k = tf.sigmoid(tf.matmul(X, self.W_k) + tf.matmul(h, self.W_hk) + tf.matmul(V, self.W_vk) + self.b_k)
-        
-        hx = tf.tanh(tf.matmul(X, self.W_s) + tf.matmul(h, self.W_hs)  + self.b_s)
-        hv = tf.tanh(tf.matmul(h, self.W_hv) + tf.matmul(V, self.W_v) + self.b_v)
+        hx = tf.tanh(tf.matmul(X, self.W_s) + tf.matmul(h, self.W_hs) + self.b_s)
+        hv = tf.tanh(tf.matmul(V, self.W_v) + tf.matmul(h, self.W_hv) + self.b_v)
 
         H = (1 - k) * hv + k * hx
-
         new_state = MSINStateTuple(H, V)
-        
 
-        return H, new_P, new_state
+        return H, tf.squeeze(P, -1), new_state
+
+class MSIN(tf.keras.layers.Layer):
+    def __init__(self):
+        super(MSIN, self).__init__()
+
+    def _transpose_batch_time(self, x):
+        """Transposes the batch and time dimensions of a Tensor."""
+        return tf.transpose(x, perm=[1, 0, 2])
+
+    def _dynamic_msin_loop(self, cell, inputs, s_inputs, initial_state, sequence_length, dtype, time_major):
+        """
+        Runs the MSIN loop dynamically.
+        """
+        # Transpose inputs if not time_major
+        if not time_major:
+            inputs = self._transpose_batch_time(inputs)
+            s_inputs = self._transpose_batch_time(s_inputs)
+
+        time_steps = tf.shape(inputs)[0]
+        batch_size = tf.shape(inputs)[1]
+
+        # Initialize TensorArray for outputs
+        output_ta = tf.TensorArray(dtype=dtype, size=time_steps)
+        P_ta = tf.TensorArray(dtype=dtype, size=time_steps)
+
+        # Initialize the state
+        state = initial_state
+
+        def step_fn(time, output_ta, P_ta, state):
+            """Step function for the while loop."""
+            # Gather input for the current time step
+            X_t = inputs[time]
+            S_t = s_inputs[time]
+
+            # Call the MSIN cell
+            output, P, state = cell(X_t, S_t, state)
+
+            # Write output and P to TensorArray
+            output_ta = output_ta.write(time, output)
+            P_ta = P_ta.write(time, P)
+
+            return time + 1, output_ta, P_ta, state
+
+        # Run the loop
+        time = tf.constant(0)
+        _, output_final_ta, P_final_ta, final_state = tf.while_loop(
+            lambda t, *_: t < time_steps,
+            step_fn,
+            loop_vars=(time, output_ta, P_ta, state),
+            parallel_iterations=32,
+            swap_memory=True
+        )
+
+        # Stack the outputs
+        outputs = output_final_ta.stack()
+        P = P_final_ta.stack()
+
+        # Transpose back if not time_major
+        if not time_major:
+            outputs = self._transpose_batch_time(outputs)
+            P = self._transpose_batch_time(P)
+
+        return outputs, P, final_state
+
+    def dynamic_msin(self, cell, inputs, s_inputs, sequence_length=None, initial_state=None, dtype=tf.float32, time_major=False):
+        """
+        High-level interface for running the MSIN loop.
+        """
+        if initial_state is None:
+            batch_size = tf.shape(inputs)[1] if time_major else tf.shape(inputs)[0]
+            initial_state = cell.zero_state(batch_size, dtype)
+
+        # Run the dynamic loop
+        outputs, P, final_state = self._dynamic_msin_loop(
+            cell=cell,
+            inputs=inputs,
+            s_inputs=s_inputs,
+            initial_state=initial_state,
+            sequence_length=sequence_length,
+            dtype=dtype,
+            time_major=time_major
+        )
+
+        return outputs, P, final_state
 
 
-
-
-class MSIN(object):
     
     def _concat(self,prefix, suffix, static=False):
         if isinstance(prefix, ops.Tensor):
